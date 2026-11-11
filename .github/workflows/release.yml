@@ -45,16 +45,11 @@ jobs:
       - name: Cross-Compile GoLab v2 Binaries
         run: |
           mkdir -p dist
-          VERSION="${GITHUB_REF_NAME}"
-          for target in "darwin arm64 golab-darwin-arm64" \
-                        "darwin amd64 golab-darwin-amd64" \
-                        "linux amd64 golab-linux-amd64" \
-                        "linux arm64 golab-linux-arm64" \
-                        "windows amd64 golab-windows-amd64.exe"; do
-            set -- $target
-            echo "Building $3 ($1/$2)..."
-            CGO_ENABLED=0 GOOS=$1 GOARCH=$2 go build -trimpath -ldflags="-s -w" -o "dist/$3" ./cmd/server
-          done
+          CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/golab-darwin-arm64 ./cmd/server
+          CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/golab-darwin-amd64 ./cmd/server
+          CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/golab-linux-amd64 ./cmd/server
+          CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/golab-linux-arm64 ./cmd/server
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/golab-windows-amd64.exe ./cmd/server
           (cd dist && sha256sum golab-* > checksums.txt)
 
       - name: Publish GitHub Release Assets
