@@ -37,7 +37,8 @@ jobs:
           cache: "pnpm"
           cache-dependency-path: ui/pnpm-lock.yaml
 
-      - name: Setup Google Chrome for Gate 6 Headless E2E
+      - name: Setup Google Chrome for Gate 6 Headless E2E (Linux)
+        if: runner.os == 'Linux'
         id: setup-chrome
         uses: browser-actions/setup-chrome@v1
         with:
@@ -49,5 +50,5 @@ jobs:
 
       - name: Run all 6 verification gates
         env:
-          CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
+          CHROME_PATH: ${{ runner.os == 'Linux' && steps.setup-chrome.outputs.chrome-path || '' }}
         run: chmod +x ./scripts/verify.sh && ./scripts/verify.sh
