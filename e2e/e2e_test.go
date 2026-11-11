@@ -354,6 +354,9 @@ func (m *mockCDPServer) evaluate(tabID string, expr string) (string, error) {
 	case strings.Contains(expr, "GOLAB_OP:get_proxy_url"):
 		return `{"port":8080,"url":"https://8080-m-s-alpha01.prod.r.colab.dev"}`, nil
 
+	case strings.Contains(expr, "GOLAB_OP:run_code_cell"):
+		return `{"success":true,"result":{"cell_id":"cell-alpha-1","index":0,"status":"running","is_running":true,"execution_count":1,"elapsed_seconds":0.2,"stdout":"epoch 1/100...","outputs":[],"message":"Cell is actively executing in the background."}}`, nil
+
 	case strings.Contains(expr, "colabMcpToolsService"):
 		switch {
 		case strings.Contains(expr, `"getCellsTool"`):
@@ -409,8 +412,15 @@ func launchHeadlessUIChrome(t *testing.T, ctx context.Context, startURL string) 
 		"--headless=new",
 		"--disable-gpu",
 		"--no-sandbox",
+		"--disable-dev-shm-usage",
+		"--disable-background-networking",
+		"--disable-extensions",
+		"--disable-sync",
+		"--disable-translate",
 		"--no-first-run",
 		"--no-default-browser-check",
+		"--use-mock-keychain",
+		"--password-store=basic",
 		"--window-size=1440,900",
 		fmt.Sprintf("--remote-debugging-port=%d", uiCDPPort),
 		"--remote-allow-origins=*",
@@ -482,7 +492,9 @@ func launchHeadlessUIChrome(t *testing.T, ctx context.Context, startURL string) 
 
 func (u *uiDriver) evalString(ctx context.Context, js string) string {
 	u.t.Helper()
-	raw, err := u.cdp.Evaluate(ctx, js)
+	callCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	raw, err := u.cdp.Evaluate(callCtx, js)
 	if err != nil {
 		u.t.Fatalf("UI JS evaluate error: %v\nscript:\n%s", err, js)
 	}
@@ -498,7 +510,9 @@ func (u *uiDriver) waitFor(ctx context.Context, desc string, timeout time.Durati
 	deadline := time.Now().Add(timeout)
 	var lastVal string
 	for time.Now().Before(deadline) {
-		raw, err := u.cdp.Evaluate(ctx, predicateJS)
+		callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		raw, err := u.cdp.Evaluate(callCtx, predicateJS)
+		cancel()
 		if err == nil {
 			lastVal = strings.TrimSpace(string(raw))
 			if lastVal == "true" {
@@ -509,8 +523,15 @@ func (u *uiDriver) waitFor(ctx context.Context, desc string, timeout time.Durati
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	bodySnap := u.evalString(ctx, `String(document.body?.innerText || '').slice(0, 1200)`)
-	hashSnap := u.evalString(ctx, `String(window.location.hash || '')`)
+	snapCtx, cancelSnap := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancelSnap()
+	var bodySnap, hashSnap string
+	if rawB, errB := u.cdp.Evaluate(snapCtx, `String(document.body?.innerText || '').slice(0, 1200)`); errB == nil {
+		_ = json.Unmarshal(rawB, &bodySnap)
+	}
+	if rawH, errH := u.cdp.Evaluate(snapCtx, `String(window.location.hash || '')`); errH == nil {
+		_ = json.Unmarshal(rawH, &hashSnap)
+	}
 	u.t.Fatalf("timed out waiting for %s (last=%s, hash=%s)\nvisible DOM text:\n%s", desc, lastVal, hashSnap, bodySnap)
 }
 

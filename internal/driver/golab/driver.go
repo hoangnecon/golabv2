@@ -190,7 +190,34 @@ func (d *Driver) FetchKernelXHR(ctx context.Context, path string, opts domain.Fe
 }
 
 // CallColabMcpTool invokes one of Colab's native frontend MCP tools (get_cells, add_code_cell, etc.).
+// Special case: run_code_cell uses ScriptRunCellBounded so long-running training cells NEVER hang MCP!
 func (d *Driver) CallColabMcpTool(ctx context.Context, toolName string, args map[string]any) (json.RawMessage, error) {
+	if toolName == "run_code_cell" {
+		cellID, _ := args["cellId"].(string)
+		waitMs := 8000
+		if v, ok := args["waitMs"]; ok {
+			switch n := v.(type) {
+			case int:
+				waitMs = n
+			case float64:
+				waitMs = int(n)
+			}
+		}
+		jsExpr := scripts.ScriptRunCellBounded(cellID, waitMs)
+		var resObj struct {
+			Success bool            `json:"success"`
+			Result  json.RawMessage `json:"result"`
+			Error   string          `json:"error"`
+		}
+		if err := d.evaluateJSON(ctx, jsExpr, &resObj); err != nil {
+			return nil, fmt.Errorf("call mcp tool run_code_cell: %w", err)
+		}
+		if resObj.Error != "" {
+			return nil, errors.New(resObj.Error)
+		}
+		return resObj.Result, nil
+	}
+
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
 		return nil, err
@@ -368,8 +395,27 @@ func (d *Driver) GetBuildInfo(ctx context.Context) (*domain.BuildInfo, error) {
 	return &domain.BuildInfo{ReleaseTag: raw.ReleaseTag}, nil
 }
 
+func isInteractiveGoogleOAuthPage(t domain.CDPTarget) bool {
+	if t.Type != "page" {
+		return false
+	}
+	u := strings.ToLower(t.URL)
+	if !strings.Contains(u, "accounts.google.com") {
+		return false
+	}
+	// Never match silent background cookie-rotation or frame helper endpoints!
+	if strings.Contains(u, "rotatecookies") || strings.Contains(u, "checkconnection") || strings.Contains(u, "listaccounts") {
+		return false
+	}
+	return strings.Contains(u, "/o/oauth2/") ||
+		strings.Contains(u, "/signin/oauth") ||
+		strings.Contains(u, "/v3/signin") ||
+		strings.Contains(u, "servicelogin") ||
+		strings.Contains(u, "accountchooser")
+}
+
 // CheckDriveStatus performs ground-truth Google Drive FUSE mount verification.
-// When allowKernelVerify is false (e.g., during non-blocking /observe when busy), only DOM + /api/colab/drive XHR is run.
+// When allowKernelVerify is false (e.g., during non-blocking /observe when busy), DOM + /api/colab/drive + /api/contents/content/drive XHR is run.
 // When allowKernelVerify is true, /proc/mounts and shutil.disk_usage are checked (using sidecar if primary kernel is busy),
 // catching unauthenticated local shadow directories (/content/drive created via os.makedirs).
 func (d *Driver) CheckDriveStatus(ctx context.Context, allowKernelVerify bool) (*domain.DriveStatus, error) {
@@ -387,7 +433,7 @@ func (d *Driver) CheckDriveStatus(ctx context.Context, allowKernelVerify bool) (
 			return ds
 		}
 		for _, t := range targets {
-			if strings.Contains(t.URL, "accounts.google.com") {
+			if isInteractiveGoogleOAuthPage(t) {
 				ds.Status = "drive_auth_pending"
 				ds.AuthPopupTabID = t.ID
 				ds.AuthPopupURL = t.URL
@@ -557,7 +603,7 @@ func (d *Driver) MountDrive(ctx context.Context) (*domain.DriveMountResult, erro
 	if d.browser != nil && d.cdpPort > 0 {
 		targets, _ := d.browser.ListTargets(ctx, d.cdpPort)
 		for _, t := range targets {
-			if strings.Contains(t.URL, "accounts.google.com") {
+			if isInteractiveGoogleOAuthPage(t) {
 				popupID = t.ID
 				popupURL = t.URL
 				if t.WebSocketDebuggerURL != "" {

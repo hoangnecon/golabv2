@@ -14,7 +14,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const ServerVersion = "v2.0.0"
+const ServerVersion = "v2.0.1"
 
 // Dependencies bundles pure-domain ports and services injected into the MCP Server.
 type Dependencies struct {
@@ -277,7 +277,7 @@ func (s *Server) registerTools() {
 	// Group 6 — Cell Execution, Outputs & Persistence (5 tools)
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "colab_run_code_cell",
-		Description: "Executes a code cell by cell_id on the notebook runtime.",
+		Description: "Triggers execution of a code cell by cell_id with a bounded wait window (default 8s, or wait_seconds=0 for instant fire-and-forget); returns status='running' immediately if the cell is long-running so multi-hour training never hangs MCP. Poll colab_get_running_cells / colab_get_cell_output for live progress.",
 	}, s.colabRunCodeCell)
 
 	mcp.AddTool(s.mcp, &mcp.Tool{

@@ -1,7 +1,8 @@
 package scripts
 
-// ScriptCheckDriveFast performs a non-blocking DOM + /api/colab/drive XHR inspection
-// that is 100% safe even while a primary training cell is busy.
+// ScriptCheckDriveFast performs a non-blocking DOM + /api/colab/drive + /api/contents/content/drive/MyDrive XHR inspection
+// that is 100% safe even while a primary training cell is busy, accurately detecting both sole-authored (dfs_persistent)
+// and manual/shared cell mounts (dfs_ephemeral).
 const ScriptCheckDriveFast = `(async () => {
 	// GOLAB_OP:check_drive_fast
 	const stripXSSI = (text) => {
@@ -18,43 +19,74 @@ const ScriptCheckDriveFast = `(async () => {
 	const nb = window.colab?.global?.notebook;
 	const kernel = nb?.getKernel ? nb.getKernel() : null;
 
-	// Search File Browser shadow roots for the Mount/Unmount Drive icon button
-	let buttonTitle = "";
-	const findMountBtn = (root) => {
-		if (!root || buttonTitle) return;
+	// Search File Browser shadow roots for visible Mount/Unmount Drive buttons.
+	// Note: Colab keeps a hidden <md-icon-button title="Mount Drive"> in DOM while rendering
+	// an active <button aria-label="Unmount Drive" title=""> when Drive is mounted!
+	let foundUnmount = false;
+	let foundMount = false;
+	const isVisible = (el) => {
+		try {
+			const rect = el.getBoundingClientRect?.();
+			if (rect && rect.width === 0 && rect.height === 0) return false;
+			const cs = window.getComputedStyle?.(el);
+			if (cs && (cs.display === "none" || cs.visibility === "hidden")) return false;
+		} catch (_) {}
+		return true;
+	};
+	const scanMountBtns = (root) => {
+		if (!root) return;
 		if (root.nodeType === 1) {
 			const aria = root.getAttribute?.("aria-label") || "";
 			const title = root.getAttribute?.("title") || "";
-			if (aria === "Mount Drive" || title === "Mount Drive" || title === "Unmount Drive") {
-				buttonTitle = title || aria;
-				return;
+			if (aria === "Unmount Drive" || title === "Unmount Drive") {
+				if (isVisible(root)) foundUnmount = true;
+			} else if (aria === "Mount Drive" || title === "Mount Drive") {
+				if (isVisible(root)) foundMount = true;
 			}
-			if (root.shadowRoot) findMountBtn(root.shadowRoot);
+			if (root.shadowRoot) scanMountBtns(root.shadowRoot);
 		}
 		for (const child of root.childNodes || []) {
-			findMountBtn(child);
+			scanMountBtns(child);
 		}
 	};
-	findMountBtn(document.body);
+	scanMountBtns(document.body);
+	const buttonTitle = foundUnmount ? "Unmount Drive" : (foundMount ? "Mount Drive" : "");
 
 	const credsOK = !!(kernel?.areUserCredentialsAllowed ? kernel.areUserCredentialsAllowed() : false);
 	let dfsMounted = false;
-	const xhr = kernel?.getKernelXhr ? kernel.getKernelXhr() : null;
+	let myDriveExists = false;
+	let shortcutTargetsExists = false;
+	const xhr = (kernel?.getKernelXhr ? kernel.getKernelXhr() : null) ||
+		kernel?.xhr ||
+		(kernel?.connection?.getKernelXhr ? kernel.connection.getKernelXhr() : null) ||
+		kernel?.connection?.xhr ||
+		null;
 	if (xhr) {
 		try {
-			const resp = await withTimeout(xhr.fetch("/api/colab/drive", { method: "GET" }), 4000);
-			if (resp?.ok) {
-				const clean = stripXSSI(await resp.text());
+			const [driveResp, dirResp] = await Promise.all([
+				withTimeout(xhr.fetch("/api/colab/drive", { method: "GET" }), 3500).catch(() => null),
+				withTimeout(xhr.fetch("/api/contents/content/drive?content=1", { method: "GET" }), 3500).catch(() => null)
+			]);
+			if (driveResp?.ok) {
+				const clean = stripXSSI(await driveResp.text());
 				const parsed = clean ? JSON.parse(clean) : null;
-				if (parsed && Array.isArray(parsed.dfs) && parsed.dfs.length > 0) {
+				if (parsed && Array.isArray(parsed.dfs) && parsed.dfs.some(x => String(x || "").trim() !== "")) {
 					dfsMounted = true;
 				}
+			}
+			if (dirResp?.ok) {
+				const cleanDir = stripXSSI(await dirResp.text());
+				const parsedDir = cleanDir ? JSON.parse(cleanDir) : null;
+				const entries = Array.isArray(parsedDir?.content) ? parsedDir.content : [];
+				myDriveExists = entries.some(e => e?.name === "MyDrive" && e?.type === "directory");
+				shortcutTargetsExists = entries.some(e => e?.name === ".shortcut-targets-by-id");
 			}
 		} catch (_) {}
 	}
 
 	const btnSaysMounted = buttonTitle === "Unmount Drive";
-	const mounted = dfsMounted && (btnSaysMounted || credsOK || buttonTitle === "");
+	const mounted = (myDriveExists && (shortcutTargetsExists || btnSaysMounted || dfsMounted || credsOK)) ||
+		(dfsMounted && (btnSaysMounted || credsOK));
 
 	return JSON.stringify({
 		mounted,
@@ -62,9 +94,9 @@ const ScriptCheckDriveFast = `(async () => {
 		mount_path: "/content/drive",
 		is_fuse_verified: false,
 		button_state: buttonTitle,
-		credentials_ok: credsOK,
+		credentials_ok: credsOK || mounted,
 		message: mounted
-			? "Google Drive is mounted via Colab DFS."
+			? "Google Drive (/content/drive/MyDrive) is mounted in this Colab runtime."
 			: "Google Drive is not mounted in this Colab runtime."
 	});
 })()`
@@ -187,8 +219,14 @@ const ScriptMountDriveSharedTrigger = `(async () => {
 
 	// Fire ephemeral mount asynchronously (do not await completion before clicking the modal dialog!)
 	try {
-		if (kernel.execute) {
+		const conn = kernel.connection || null;
+		if (conn && typeof conn.execute === "function") {
+			const io = { supportsUserInput: () => true, output: () => {} };
+			Promise.resolve(conn.execute("from google.colab import drive\ndrive._mount('/content/drive', force_remount=False)", io, { silent: false, storeHistory: false })).catch(() => {});
+		} else if (typeof kernel.execute === "function") {
 			Promise.resolve(kernel.execute("from google.colab import drive\ndrive._mount('/content/drive', force_remount=False)", undefined, {})).catch(() => {});
+		} else if (typeof kernel.mountDrive === "function") {
+			Promise.resolve(kernel.mountDrive()).catch(() => {});
 		} else if (nb.mountDrive) {
 			nb.mountDrive();
 		}

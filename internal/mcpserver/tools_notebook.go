@@ -192,13 +192,28 @@ func (s *Server) colabDeleteCell(ctx context.Context, req *mcp.CallToolRequest, 
 	return successResult(svcs.Target, map[string]any{"deleted": true, "cell_id": input.CellID}, latency, "")
 }
 
-func (s *Server) colabRunCodeCell(ctx context.Context, req *mcp.CallToolRequest, input CellTargetInput) (*mcp.CallToolResult, any, error) {
+// RunCodeCellInput executes a code cell with a bounded wait window so multi-hour training never blocks MCP.
+type RunCodeCellInput struct {
+	SessionID   string `json:"session_id,omitempty" jsonschema:"Optional locked session ID override."`
+	CellID      string `json:"cell_id" jsonschema:"Notebook code cell ID to execute. Required."`
+	WaitSeconds *int   `json:"wait_seconds,omitempty" jsonschema:"Max seconds to wait before returning running status in background (0 = fire-and-forget immediately, default 8s, max 30s). Never hangs on multi-hour cells."`
+}
+
+func (s *Server) colabRunCodeCell(ctx context.Context, req *mcp.CallToolRequest, input RunCodeCellInput) (*mcp.CallToolResult, any, error) {
 	start := time.Now()
 	svcs, err := s.resolveServices(ctx, input.SessionID, false)
 	if err != nil {
 		return s.failTool(ctx, nil, err, time.Since(start).Milliseconds())
 	}
-	rawOutput, err := svcs.Notebook.RunCodeCell(ctx, input.CellID)
+	waitSec := 8
+	if input.WaitSeconds != nil {
+		if *input.WaitSeconds <= 0 {
+			waitSec = 0
+		} else {
+			waitSec = *input.WaitSeconds
+		}
+	}
+	rawOutput, err := svcs.Notebook.RunCodeCell(ctx, input.CellID, waitSec)
 	latency := time.Since(start).Milliseconds()
 	if err != nil {
 		return s.failTool(ctx, svcs.Target, err, latency)

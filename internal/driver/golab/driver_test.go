@@ -261,6 +261,68 @@ func TestCheckDriveStatus_DetectsPendingOAuthPopup(t *testing.T) {
 	}
 }
 
+func TestCheckDriveStatus_IgnoresRotateCookiesIframeAndDetectsManualSharedMount(t *testing.T) {
+	// Reproduces exact live bug: Chrome has hidden RotateCookiesPage iframe + Gemini RotateCookiesPage iframe.
+	mb := &mockBrowser{
+		targets: []domain.CDPTarget{
+			{
+				ID:   "F2A6704DE316DEC9AB7D8A9CCA49C36A",
+				Type: "page",
+				URL:  "https://colab.research.google.com/drive/1GGXu3tPKe2Vup5RFd3-I9v3fWdRhc2v6",
+			},
+			{
+				ID:   "F26B5363138C4ECE8D2A73FD4DCD6FCD",
+				Type: "iframe",
+				URL:  "https://accounts.google.com/RotateCookiesPage?og_pid=425&rot=3&origin=https%3A%2F%2Fcolab.research.google.com&exp_id=0",
+			},
+			{
+				ID:   "7C70A785E072F485F8723A8F8EA2C20D",
+				Type: "page",
+				URL:  "https://accounts.google.com/RotateCookiesPage?origin=https%3A%2F%2Fgemini.google.com&hfcr_pid=2",
+			},
+		},
+	}
+
+	isMounted := false
+	drv := newTestDriver(t, mb, func(expr string) (string, error) {
+		switch {
+		case strings.Contains(expr, "GOLAB_OP:check_drive_fast"):
+			if isMounted {
+				return `{"mounted":true,"status":"mounted","mount_path":"/content/drive","is_fuse_verified":false,"button_state":"Unmount Drive","credentials_ok":true,"message":"Google Drive (/content/drive/MyDrive) is mounted in this Colab runtime."}`, nil
+			}
+			return `{"mounted":false,"status":"unmounted","mount_path":"/content/drive","is_fuse_verified":false,"button_state":"Mount Drive","credentials_ok":false,"message":"Google Drive is not mounted."}`, nil
+		case strings.Contains(expr, "GOLAB_OP:exec_python"):
+			if isMounted {
+				return `{"used_sidecar":false,"stdout":"{\"has_fuse\": true, \"is_mount\": true, \"dir_exists\": true, \"non_empty\": true, \"total\": 120942624768, \"used\": 6204850176, \"free\": 114737774592}\n"}`, nil
+			}
+			return `{"used_sidecar":false,"stdout":"{\"has_fuse\": false, \"is_mount\": false, \"dir_exists\": false, \"non_empty\": false}\n"}`, nil
+		default:
+			return "", errors.New("unexpected expr: " + expr)
+		}
+	})
+
+	ctx := context.Background()
+	// 1. When unmounted, RotateCookiesPage MUST NOT trigger drive_auth_pending!
+	stUnmounted, err := drv.CheckDriveStatus(ctx, true)
+	if err != nil {
+		t.Fatalf("CheckDriveStatus unmounted: %v", err)
+	}
+	if stUnmounted.Mounted || stUnmounted.Status != "unmounted" || stUnmounted.AuthPopupTabID != "" {
+		t.Fatalf("RotateCookiesPage falsely triggered %q: %+v", stUnmounted.Status, stUnmounted)
+	}
+
+	// 2. When manually mounted on web, both fast check and full FUSE check MUST return mounted=true!
+	isMounted = true
+	stFast, err := drv.CheckDriveStatus(ctx, false)
+	if err != nil || !stFast.Mounted || stFast.Status != "mounted" {
+		t.Fatalf("expected fast manual mount detection, got %+v, err=%v", stFast, err)
+	}
+	stFull, err := drv.CheckDriveStatus(ctx, true)
+	if err != nil || !stFull.Mounted || !stFull.IsFUSEVerified || stFull.Status != "mounted" || stFull.TotalGB < 112.0 {
+		t.Fatalf("expected FUSE-verified manual mount with real quota, got %+v, err=%v", stFull, err)
+	}
+}
+
 func TestMountDrive_SoleAuthoredAndSharedAccountOAuthPending(t *testing.T) {
 	isSoleAuthored := true
 	soleMounted := false
@@ -357,5 +419,40 @@ func TestExecPythonAndBackgroundJobs_SidecarWhenPrimaryBusy(t *testing.T) {
 	jobKill, err := drv.KillBackgroundJob(ctx, "job_1")
 	if err != nil || jobKill.Running {
 		t.Fatalf("unexpected KillBackgroundJob: %+v, err=%v", jobKill, err)
+	}
+}
+
+func TestRunCodeCellBounded_NeverBlocksOnLongTraining(t *testing.T) {
+	var gotWaitMs bool
+	drv := newTestDriver(t, &mockBrowser{}, func(expr string) (string, error) {
+		if !strings.Contains(expr, "GOLAB_OP:run_code_cell") {
+			return "", errors.New("expected GOLAB_OP:run_code_cell, got: " + expr)
+		}
+		if strings.Contains(expr, `"wait_ms":0`) {
+			gotWaitMs = true
+		}
+		return `{"success":true,"result":{"cell_id":"cell-train","index":3,"status":"running","is_running":true,"execution_count":1,"elapsed_seconds":0.1,"stdout":"[PLAN] Training 5 hours...\n","stderr":"","error_text":"","outputs":[],"message":"Cell is actively executing in the background."}}`, nil
+	})
+
+	raw, err := drv.CallColabMcpTool(context.Background(), "run_code_cell", map[string]any{
+		"cellId": "cell-train",
+		"waitMs": 0,
+	})
+	if err != nil {
+		t.Fatalf("CallColabMcpTool run_code_cell: %v", err)
+	}
+	if !gotWaitMs {
+		t.Fatalf("expected wait_ms=0 to be forwarded to ScriptRunCellBounded")
+	}
+	var parsed struct {
+		CellID    string `json:"cell_id"`
+		Status    string `json:"status"`
+		IsRunning bool   `json:"is_running"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("unmarshal run_code_cell result: %v", err)
+	}
+	if parsed.CellID != "cell-train" || parsed.Status != "running" || !parsed.IsRunning {
+		t.Fatalf("expected non-blocking running status, got %+v", parsed)
 	}
 }

@@ -128,12 +128,24 @@ func (s *Service) MoveCell(ctx context.Context, cellID string, newIndex int) err
 	return nil
 }
 
-func (s *Service) RunCodeCell(ctx context.Context, cellID string) (json.RawMessage, error) {
+func (s *Service) RunCodeCell(ctx context.Context, cellID string, waitSeconds ...int) (json.RawMessage, error) {
 	if strings.TrimSpace(cellID) == "" {
 		return nil, errors.New("cell_id cannot be empty")
 	}
+	waitMs := 8000
+	if len(waitSeconds) > 0 {
+		if waitSeconds[0] == 0 {
+			waitMs = 0
+		} else if waitSeconds[0] > 0 {
+			if waitSeconds[0] > 30 {
+				waitSeconds[0] = 30
+			}
+			waitMs = waitSeconds[0] * 1000
+		}
+	}
 	raw, err := s.drv.CallColabMcpTool(ctx, "run_code_cell", map[string]any{
 		"cellId": cellID,
+		"waitMs": waitMs,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("run cell %s: %w", cellID, err)

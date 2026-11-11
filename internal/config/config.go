@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const DefaultVersion = "v2.0.0"
+var DefaultVersion = "v2.0.1"
 
 // Config holds GoLab v2 Control-Plane Daemon and CLI configuration.
 type Config struct {

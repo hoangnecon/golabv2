@@ -93,16 +93,16 @@ const ScriptProbeTabState = `(async () => {
 	const connectState = String(btn?.connectState || "disconnected").toLowerCase();
 	const kernel = nb?.getKernel ? nb.getKernel() : null;
 	const kernelState = String(kernel?.getState ? kernel.getState() : (kernel?.state || "")).toLowerCase();
-	const isExecuting = !!(nb?.isExecuting ? nb.isExecuting() : false) || kernelState === "busy";
+	const isExecuting = !!(nb?.isExecuting ? nb.isExecuting() : false) || kernelState.includes("busy");
 
 	let connState = "runtime_disconnected";
 	if (permission === "denied") {
 		connState = "permission_denied";
 	} else if (permission === "auth_required") {
 		connState = "auth_required";
-	} else if (connectState === "allocating" || connectState === "connecting" || connectState === "initializing" || kernelState === "starting") {
+	} else if (connectState === "allocating" || connectState === "connecting" || connectState === "initializing" || kernelState.includes("starting") || kernelState.includes("connecting")) {
 		connState = "connecting";
-	} else if (connectState === "connected" || kernelState === "idle" || kernelState === "busy") {
+	} else if (connectState === "connected" || kernelState.includes("idle") || kernelState.includes("busy")) {
 		connState = isExecuting ? "busy" : "idle";
 	}
 
@@ -439,24 +439,31 @@ func ScriptSetAccelerator(value string, highRAM bool) string {
 const ScriptInterruptKernel = `(() => {
 	// GOLAB_OP:interrupt_kernel
 	const nb = window.colab?.global?.notebook;
-	const kernel = nb?.getKernel();
+	const kernel = nb?.getKernel ? nb.getKernel() : null;
 	if (kernel?.interrupt) {
 		kernel.interrupt();
+		return JSON.stringify({ success: true });
+	}
+	if (kernel?.connection?.interrupt) {
+		kernel.connection.interrupt();
 		return JSON.stringify({ success: true });
 	}
 	return JSON.stringify({ error: "kernel.interrupt is not available" });
 })()`
 
-// ScriptRestartKernel triggers Colab's frontend kernel.restart() and confirms any mwc-dialog prompt.
+// ScriptRestartKernel triggers Colab's frontend kernel/connection restart() and confirms any mwc-dialog prompt.
 const ScriptRestartKernel = `(async () => {
 	// GOLAB_OP:restart_kernel
 	const nb = window.colab?.global?.notebook;
 	const kernel = nb?.getKernel ? nb.getKernel() : null;
-	if (!kernel?.restart) {
+	const restartFn = kernel?.restart
+		? () => kernel.restart()
+		: (kernel?.connection?.restart ? () => kernel.connection.restart() : null);
+	if (!restartFn) {
 		return JSON.stringify({ error: "kernel.restart is not available" });
 	}
 	try {
-		const restartPromise = Promise.resolve(kernel.restart());
+		const restartPromise = Promise.resolve(restartFn());
 		const t0 = Date.now();
 		while (Date.now() - t0 < 2000) {
 			await new Promise(r => setTimeout(r, 120));
@@ -501,14 +508,15 @@ func ScriptGetProxyURL(port int) string {
 
 		let token = "";
 		let expSec = 0;
-		const ep = kernel?.getEndpoint ? kernel.getEndpoint() : null;
-		const proxyInfo = ep?.getRuntimeProxyInfo ? ep.getRuntimeProxyInfo() : ep?.runtimeProxyInfo;
+		const ep = kernel?.getEndpoint ? kernel.getEndpoint() : (kernel?.endpoint || null);
+		const proxyInfo = ep?.getRuntimeProxyInfo ? await Promise.resolve(ep.getRuntimeProxyInfo()) : ep?.runtimeProxyInfo;
 		if (proxyInfo) {
 			token = String(proxyInfo.token || "");
 			expSec = Number(proxyInfo.tokenExpiresInSeconds || 0);
 		}
-		if (!token && kernel?.getKernelXhr?.()?.getRuntimeProxyToken) {
-			token = String(await withTimeout(kernel.getKernelXhr().getRuntimeProxyToken(port), 4000) || "");
+		const xhr = (kernel?.getKernelXhr ? kernel.getKernelXhr() : null) || kernel?.xhr || (kernel?.connection?.getKernelXhr ? kernel.connection.getKernelXhr() : null);
+		if (!token && xhr?.getRuntimeProxyToken) {
+			token = String(await withTimeout(xhr.getRuntimeProxyToken(port), 4000) || "");
 		}
 
 		return JSON.stringify({

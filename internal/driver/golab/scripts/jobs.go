@@ -5,8 +5,8 @@ import (
 	"fmt"
 )
 
-// ScriptExecPython evaluates Python silently on the primary kernel when idle,
-// or spawns/reuses an out-of-band sidecar kernel via POST /api/kernels + /channels WebSocket
+// ScriptExecPython evaluates Python silently via Jupyter WebSocket /api/kernels/<id>/channels
+// on the primary kernel when idle, or spawns/reuses an out-of-band sidecar kernel via POST /api/kernels
 // when the primary kernel is busy and preferSidecarWhenBusy is true.
 func ScriptExecPython(code string, preferSidecarWhenBusy bool) string {
 	payload, _ := json.Marshal(map[string]any{
@@ -34,148 +34,207 @@ func ScriptExecPython(code string, preferSidecarWhenBusy bool) string {
 		}
 
 		const kState = String(kernel.getState ? kernel.getState() : (kernel.state || "")).toLowerCase();
-		const isBusy = !!(nb?.isExecuting ? nb.isExecuting() : false) || kState === "busy";
+		const isBusy = !!(nb?.isExecuting ? nb.isExecuting() : false) || kState.includes("busy");
+		const useSidecar = isBusy && !!cfg.prefer_sidecar;
 
-		if (!isBusy || !cfg.prefer_sidecar) {
-			let stdout = "";
-			let stderr = "";
-			let errMsg = "";
-			let resultText = "";
-			try {
-				const res = await withTimeout(kernel.execute(cfg.code, {
-					output: (msg) => {
-						const mt = msg?.header?.msg_type || msg?.msg_type || "";
-						const content = msg?.content || {};
-						if (mt === "stream") {
-							if (content.name === "stderr") stderr += String(content.text || "");
-							else stdout += String(content.text || "");
-						} else if (mt === "execute_result" || mt === "display_data") {
-							const plain = content?.data?.["text/plain"];
-							if (plain) resultText += String(plain);
-						} else if (mt === "error") {
-							errMsg = (content.ename || "Error") + ": " + (content.evalue || "");
+		const xhr = (kernel.getKernelXhr ? kernel.getKernelXhr() : null) ||
+			kernel.xhr ||
+			(kernel.connection?.getKernelXhr ? kernel.connection.getKernelXhr() : null) ||
+			kernel.connection?.xhr ||
+			null;
+		const conn = kernel.connection || null;
+
+		// Resolve target kernel ID: primary kernel when idle, or sidecar kernel when busy
+		let targetKernelId = "";
+		if (!useSidecar) {
+			targetKernelId = String(
+				(conn?.getKernelId ? conn.getKernelId() : "") ||
+				conn?.kernelId ||
+				kernel.id ||
+				""
+			);
+			if (!targetKernelId && xhr) {
+				try {
+					const kResp = await withTimeout(xhr.fetch("/api/kernels", { method: "GET" }), 4000, "list kernels");
+					if (kResp?.ok) {
+						const kList = JSON.parse(stripXSSI(await kResp.text()));
+						if (Array.isArray(kList) && kList.length > 0 && kList[0]?.id) {
+							targetKernelId = String(kList[0].id);
 						}
 					}
-				}, {}), 30000, "kernel.execute");
-				if (!stdout && typeof res === "object" && res !== null) {
-					if (res.stdout) stdout = String(res.stdout);
-					if (res.result && !resultText) resultText = String(res.result);
+				} catch (_) {}
+			}
+		} else {
+			if (!xhr) {
+				return JSON.stringify({ error: "Kernel XHR tunnel unavailable for sidecar execution." });
+			}
+			let sidecarId = window.__golabSidecarKernelId || "";
+			if (sidecarId) {
+				try {
+					const checkResp = await withTimeout(xhr.fetch("/api/kernels/" + sidecarId, { method: "GET" }), 4000, "check sidecar");
+					if (!checkResp.ok) sidecarId = "";
+				} catch (_) {
+					sidecarId = "";
 				}
-			} catch (err) {
-				errMsg = err.toString();
 			}
-			return JSON.stringify({
-				used_sidecar: false,
-				kernel_id: String(kernel.id || ""),
-				stdout,
-				stderr,
-				result: resultText,
-				error: errMsg
-			});
-		}
-
-		// Primary kernel is busy and prefer_sidecar is true: spawn or reuse window.__golabSidecarKernelId
-		const xhr = kernel.getKernelXhr ? kernel.getKernelXhr() : null;
-		if (!xhr) {
-			return JSON.stringify({ error: "Kernel XHR tunnel unavailable for sidecar execution." });
-		}
-
-		let sidecarId = window.__golabSidecarKernelId || "";
-		if (sidecarId) {
-			try {
-				const checkResp = await withTimeout(xhr.fetch("/api/kernels/" + sidecarId, { method: "GET" }), 4000, "check sidecar");
-				if (!checkResp.ok) sidecarId = "";
-			} catch (_) {
-				sidecarId = "";
+			if (!sidecarId) {
+				const createResp = await withTimeout(xhr.fetch("/api/kernels", {
+					method: "POST",
+					headers: new Headers({ "Content-Type": "application/json" }),
+					body: JSON.stringify({ name: "python3" })
+				}), 8000, "spawn sidecar kernel");
+				if (!createResp.ok) {
+					return JSON.stringify({ error: "Failed to spawn sidecar kernel: HTTP " + createResp.status });
+				}
+				const created = JSON.parse(stripXSSI(await createResp.text()));
+				sidecarId = String(created.id || "");
+				window.__golabSidecarKernelId = sidecarId;
 			}
+			targetKernelId = sidecarId;
 		}
 
-		if (!sidecarId) {
-			const createResp = await withTimeout(xhr.fetch("/api/kernels", {
-				method: "POST",
-				headers: new Headers({ "Content-Type": "application/json" }),
-				body: JSON.stringify({ name: "python3" })
-			}), 8000, "spawn sidecar kernel");
-			if (!createResp.ok) {
-				return JSON.stringify({ error: "Failed to spawn sidecar kernel: HTTP " + createResp.status });
-			}
-			const created = JSON.parse(stripXSSI(await createResp.text()));
-			sidecarId = String(created.id || "");
-			window.__golabSidecarKernelId = sidecarId;
-		}
-
-		const ep = kernel.getEndpoint ? kernel.getEndpoint() : null;
-		const proxyInfo = ep?.getRuntimeProxyInfo ? ep.getRuntimeProxyInfo() : ep?.runtimeProxyInfo;
+		// Primary path: Direct Jupyter /api/kernels/<id>/channels WebSocket over Colab runtime proxy
+		const ep = kernel.getEndpoint ? kernel.getEndpoint() : (kernel.endpoint || null);
+		let proxyInfo = null;
+		try {
+			proxyInfo = ep?.getRuntimeProxyInfo ? await Promise.resolve(ep.getRuntimeProxyInfo()) : ep?.runtimeProxyInfo;
+		} catch (_) {}
 		const baseURL = String(proxyInfo?.url || "").replace(/^http/, "ws").replace(/\/$/, "");
 		const token = String(proxyInfo?.token || "");
-		if (!baseURL) {
-			return JSON.stringify({ error: "Runtime proxy WebSocket endpoint unavailable for sidecar kernel." });
+
+		if (baseURL && targetKernelId) {
+			const msgId = "golab_" + Math.random().toString(36).slice(2) + "_" + Date.now();
+			const sessionId = "golab_sess_" + targetKernelId;
+			const wsURL = baseURL + "/api/kernels/" + encodeURIComponent(targetKernelId) + "/channels?session_id=" + encodeURIComponent(sessionId) +
+				(token ? "&colab-runtime-proxy-token=" + encodeURIComponent(token) : "");
+
+			try {
+				const execViaWS = await withTimeout(new Promise((resolve, reject) => {
+					let stdout = "";
+					let stderr = "";
+					let resultText = "";
+					let errMsg = "";
+					let settled = false;
+					const ws = new WebSocket(wsURL);
+					ws.onopen = () => {
+						ws.send(JSON.stringify({
+							header: {
+								msg_id: msgId,
+								username: "golab",
+								session: sessionId,
+								msg_type: "execute_request",
+								version: "5.3"
+							},
+							parent_header: {},
+							metadata: {},
+							content: {
+								code: cfg.code,
+								silent: false,
+								store_history: false,
+								user_expressions: {},
+								allow_stdin: false,
+								stop_on_error: true
+							},
+							buffers: [],
+							channel: "shell"
+						}));
+					};
+					ws.onerror = () => {
+						if (!settled) {
+							settled = true;
+							reject(new Error("Kernel WebSocket error"));
+						}
+					};
+					ws.onclose = () => {
+						if (!settled) {
+							settled = true;
+							reject(new Error("Kernel WebSocket closed before execute_reply"));
+						}
+					};
+					ws.onmessage = (ev) => {
+						try {
+							const msg = JSON.parse(String(ev.data || "{}"));
+							if (msg?.parent_header?.msg_id !== msgId) return;
+							const mt = msg?.header?.msg_type || msg?.msg_type || "";
+							const c = msg?.content || {};
+							if (mt === "stream") {
+								if (c.name === "stderr") stderr += String(c.text || "");
+								else stdout += String(c.text || "");
+							} else if (mt === "execute_result" || mt === "display_data") {
+								const plain = c?.data?.["text/plain"];
+								if (plain) resultText += String(plain);
+							} else if (mt === "error") {
+								errMsg = (c.ename || "Error") + ": " + (c.evalue || "");
+							} else if (mt === "execute_reply") {
+								settled = true;
+								try { ws.close(); } catch (_) {}
+								resolve({ stdout, stderr, result: resultText, error: errMsg });
+							}
+						} catch (_) {}
+					};
+				}), 30000, "kernel channels execute_request");
+
+				return JSON.stringify({
+					used_sidecar: useSidecar,
+					kernel_id: targetKernelId,
+					stdout: execViaWS.stdout,
+					stderr: execViaWS.stderr,
+					result: execViaWS.result,
+					error: execViaWS.error
+				});
+			} catch (wsErr) {
+				if (useSidecar) {
+					return JSON.stringify({ error: wsErr.toString() });
+				}
+			}
 		}
 
-		const msgId = "golab_" + Math.random().toString(36).slice(2) + "_" + Date.now();
-		const sessionId = "golab_sess_" + sidecarId;
-		const wsURL = baseURL + "/api/kernels/" + encodeURIComponent(sidecarId) + "/channels?session_id=" + encodeURIComponent(sessionId) +
-			(token ? "&colab-runtime-proxy-token=" + encodeURIComponent(token) : "");
+		// Fallback path for primary kernel (or lightweight mocks): kernel.connection.execute / kernel.execute
+		const execTarget = (conn && typeof conn.execute === "function") ? conn : (typeof kernel.execute === "function" ? kernel : null);
+		if (!execTarget) {
+			return JSON.stringify({ error: "No executable Colab kernel channel available." });
+		}
 
-		const execViaWS = await withTimeout(new Promise((resolve, reject) => {
-			let stdout = "";
-			let stderr = "";
-			let resultText = "";
-			let errMsg = "";
-			const ws = new WebSocket(wsURL);
-			ws.onopen = () => {
-				ws.send(JSON.stringify({
-					header: {
-						msg_id: msgId,
-						username: "golab",
-						session: sessionId,
-						msg_type: "execute_request",
-						version: "5.3"
-					},
-					parent_header: {},
-					metadata: {},
-					content: {
-						code: cfg.code,
-						silent: false,
-						store_history: false,
-						user_expressions: {},
-						allow_stdin: false,
-						stop_on_error: true
-					},
-					buffers: [],
-					channel: "shell"
-				}));
-			};
-			ws.onerror = () => reject(new Error("Sidecar WebSocket error"));
-			ws.onmessage = (ev) => {
-				try {
-					const msg = JSON.parse(String(ev.data || "{}"));
-					if (msg?.parent_header?.msg_id !== msgId) return;
+		let stdout = "";
+		let stderr = "";
+		let errMsg = "";
+		let resultText = "";
+		try {
+			const ioHandler = {
+				supportsUserInput: () => false,
+				output: (msg) => {
 					const mt = msg?.header?.msg_type || msg?.msg_type || "";
-					const c = msg?.content || {};
+					const content = msg?.content || {};
 					if (mt === "stream") {
-						if (c.name === "stderr") stderr += String(c.text || "");
-						else stdout += String(c.text || "");
+						if (content.name === "stderr") stderr += String(content.text || "");
+						else stdout += String(content.text || "");
 					} else if (mt === "execute_result" || mt === "display_data") {
-						const plain = c?.data?.["text/plain"];
+						const plain = content?.data?.["text/plain"];
 						if (plain) resultText += String(plain);
 					} else if (mt === "error") {
-						errMsg = (c.ename || "Error") + ": " + (c.evalue || "");
-					} else if (mt === "execute_reply") {
-						ws.close();
-						resolve({ stdout, stderr, result: resultText, error: errMsg });
+						errMsg = (content.ename || "Error") + ": " + (content.evalue || "");
 					}
-				} catch (_) {}
+				}
 			};
-		}), 30000, "sidecar execute_request");
-
+			const res = await withTimeout(
+				Promise.resolve(execTarget.execute(cfg.code, ioHandler, { silent: false, storeHistory: false })),
+				30000,
+				"kernel.execute"
+			);
+			if (!stdout && typeof res === "object" && res !== null) {
+				if (res.stdout) stdout = String(res.stdout);
+				if (res.result && !resultText) resultText = String(res.result);
+			}
+		} catch (err) {
+			errMsg = err.toString();
+		}
 		return JSON.stringify({
-			used_sidecar: true,
-			kernel_id: sidecarId,
-			stdout: execViaWS.stdout,
-			stderr: execViaWS.stderr,
-			result: execViaWS.result,
-			error: execViaWS.error
+			used_sidecar: false,
+			kernel_id: targetKernelId || String(kernel.id || ""),
+			stdout,
+			stderr,
+			result: resultText,
+			error: errMsg
 		});
 	})()`, string(payload), string(payload))
 }

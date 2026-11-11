@@ -110,3 +110,73 @@ func TestCDPClient_ConcurrentOutOfOrderEvaluate(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCDPClient_AutoReconnectOnClosedWebSocketAndLargePayload(t *testing.T) {
+	var connCount int
+	var mu sync.Mutex
+	largeText := strings.Repeat("x", 128*1024) // 128 KB (> default 32 KB websocket limit)
+
+	wsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		conn.SetReadLimit(64 * 1024 * 1024)
+		mu.Lock()
+		connCount++
+		curConn := connCount
+		mu.Unlock()
+
+		ctx := r.Context()
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			_ = conn.Close(websocket.StatusNormalClosure, "")
+			return
+		}
+		// Drop the very first request's socket mid-flight to force transparent auto-reconnect!
+		if curConn == 1 {
+			_ = conn.Close(websocket.StatusGoingAway, "simulated chrome target reset")
+			return
+		}
+		var req struct {
+			ID int64 `json:"id"`
+		}
+		_ = json.Unmarshal(data, &req)
+		resp := map[string]any{
+			"id": req.ID,
+			"result": map[string]any{
+				"result": map[string]any{
+					"type":  "string",
+					"value": largeText,
+				},
+			},
+		}
+		b, _ := json.Marshal(resp)
+		_ = conn.Write(ctx, websocket.MessageText, b)
+		_ = conn.Close(websocket.StatusNormalClosure, "done")
+	}))
+	defer wsSrv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(wsSrv.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := bridge.NewTargetCDPClient(0, bridge.TargetInfo{
+		ID:                   "tab-reconn",
+		Type:                 "page",
+		WebSocketDebuggerURL: wsURL,
+	})
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer client.Close()
+
+	raw, err := client.Evaluate(ctx, "big_output()")
+	if err != nil {
+		t.Fatalf("expected transparent auto-reconnect to succeed, got err: %v", err)
+	}
+	var got string
+	if err := json.Unmarshal(raw, &got); err != nil || len(got) != len(largeText) {
+		t.Fatalf("unexpected large payload len=%d, err=%v", len(got), err)
+	}
+}

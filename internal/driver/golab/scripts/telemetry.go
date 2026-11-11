@@ -16,7 +16,11 @@ func ScriptFetchKernelXHR(method, headersJSON, bodyJSON, path string) string {
 			return JSON.stringify({ error: "No active Colab kernel instance found. Please connect runtime." });
 		}
 
-		const xhr = kernel.getKernelXhr ? kernel.getKernelXhr() : null;
+		const xhr = (kernel.getKernelXhr ? kernel.getKernelXhr() : null) ||
+			kernel.xhr ||
+			(kernel.connection?.getKernelXhr ? kernel.connection.getKernelXhr() : null) ||
+			kernel.connection?.xhr ||
+			null;
 		if (!xhr) {
 			return JSON.stringify({ error: "Kernel XHR tunnel interface is unavailable." });
 		}

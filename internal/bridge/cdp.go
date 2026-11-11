@@ -332,7 +332,33 @@ func (c *CDPClient) readLoop(conn *websocket.Conn, closed chan struct{}) {
 }
 
 // Call executes an arbitrary CDP method on the connected target and returns raw result JSON.
+// If a cached target WebSocket closed between calls, it transparently reconnects once.
 func (c *CDPClient) Call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
+	res, err := c.callOnce(ctx, method, params)
+	if err != nil && ctx.Err() == nil && isRetryableCDPError(err) {
+		_ = c.Close()
+		if reconnErr := c.ensureConnected(ctx); reconnErr == nil {
+			return c.callOnce(ctx, method, params)
+		}
+	}
+	return res, err
+}
+
+func isRetryableCDPError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "cdp websocket closed") ||
+		strings.Contains(msg, "cdp connection closed") ||
+		strings.Contains(msg, "cdp websocket disconnected") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "use of closed network connection") ||
+		strings.Contains(msg, "eof")
+}
+
+func (c *CDPClient) callOnce(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
 	if err := c.ensureConnected(ctx); err != nil {
 		return nil, err
 	}
@@ -362,10 +388,14 @@ func (c *CDPClient) Call(ctx context.Context, method string, params map[string]a
 		return nil, errors.New("cdp connection closed")
 	}
 
+	writeCtx, cancelWrite := context.WithTimeout(ctx, 5*time.Second)
 	c.writeMu.Lock()
-	writeErr := conn.Write(ctx, websocket.MessageText, reqBytes)
+	writeErr := conn.Write(writeCtx, websocket.MessageText, reqBytes)
 	c.writeMu.Unlock()
+	cancelWrite()
 	if writeErr != nil {
+		// Force-close broken socket so no subsequent caller blocks on writeMu!
+		_ = c.Close()
 		return nil, fmt.Errorf("send cdp request: %w", writeErr)
 	}
 

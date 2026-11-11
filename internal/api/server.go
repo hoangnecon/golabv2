@@ -33,7 +33,7 @@ type Server struct {
 // NewServer constructs a Control-Plane HTTP Server with pure-domain service dependencies.
 func NewServer(deps Dependencies) *Server {
 	if deps.Version == "" {
-		deps.Version = "v2.0.0"
+		deps.Version = "v2.0.1"
 	}
 	return &Server{deps: deps}
 }
