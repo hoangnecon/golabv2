@@ -1,0 +1,175 @@
+@import '@fontsource/ibm-plex-sans/latin-400.css';
+@import '@fontsource/ibm-plex-sans/latin-500.css';
+@import '@fontsource/ibm-plex-sans/latin-600.css';
+@import '@fontsource/jetbrains-mono/latin-400.css';
+@import '@fontsource/jetbrains-mono/latin-500.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /*
+   * GoLab v2 Pure Neutral Monochrome Tokens (100% R = G = B).
+   * Base :root keeps `color-scheme: light dark` and reacts to both OS preference
+   * and explicit <meta name="color-scheme"> user override.
+   */
+  :root {
+    color-scheme: light dark;
+    --c-app: 245 245 245;
+    --c-canvas: 252 252 252;
+    --c-surface: 255 255 255;
+    --c-raised: 238 238 238;
+    --c-hover: 228 228 228;
+    --c-line: 214 214 214;
+    --c-line-strong: 176 176 176;
+    --c-fg: 18 18 18;
+    --c-muted: 82 82 82;
+    --c-subtle: 112 112 112;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not(:has(> head > meta[name='color-scheme'][content='light'])) {
+      --c-app: 12 12 12;
+      --c-canvas: 18 18 18;
+      --c-surface: 24 24 24;
+      --c-raised: 32 32 32;
+      --c-hover: 42 42 42;
+      --c-line: 48 48 48;
+      --c-line-strong: 76 76 76;
+      --c-fg: 242 242 242;
+      --c-muted: 163 163 163;
+      --c-subtle: 124 124 124;
+    }
+  }
+
+  :root:has(> head > meta[name='color-scheme'][content='dark']) {
+    color-scheme: dark;
+    --c-app: 12 12 12;
+    --c-canvas: 18 18 18;
+    --c-surface: 24 24 24;
+    --c-raised: 32 32 32;
+    --c-hover: 42 42 42;
+    --c-line: 48 48 48;
+    --c-line-strong: 76 76 76;
+    --c-fg: 242 242 242;
+    --c-muted: 163 163 163;
+    --c-subtle: 124 124 124;
+  }
+
+  :root:has(> head > meta[name='color-scheme'][content='light']) {
+    color-scheme: light;
+    --c-app: 245 245 245;
+    --c-canvas: 252 252 252;
+    --c-surface: 255 255 255;
+    --c-raised: 238 238 238;
+    --c-hover: 228 228 228;
+    --c-line: 214 214 214;
+    --c-line-strong: 176 176 176;
+    --c-fg: 18 18 18;
+    --c-muted: 82 82 82;
+    --c-subtle: 112 112 112;
+  }
+
+  html {
+    @apply bg-app;
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--c-line-strong)) transparent;
+  }
+
+  /* Never set a font size on html: rem units (all spacing) derive from it. */
+  body {
+    @apply m-0 bg-app font-sans text-body text-fg antialiased;
+    font-feature-settings: 'tnum' 1, 'cv11' 1;
+  }
+
+  ::selection {
+    background: rgb(var(--c-fg) / 0.2);
+  }
+
+  :focus-visible {
+    outline: 2px solid rgb(var(--c-fg));
+    outline-offset: 2px;
+  }
+
+  /* Native modal <dialog>: scope display to [open] and prevent scroll chaining without mutating body. */
+  dialog[open] {
+    display: flex;
+    flex-direction: column;
+  }
+
+  dialog:modal {
+    max-block-size: min(88dvh, 44rem);
+    overscroll-behavior: contain;
+  }
+
+  dialog::backdrop {
+    background: rgb(0 0 0 / 0.6);
+    overscroll-behavior: contain;
+    overflow: hidden;
+  }
+
+  details > summary {
+    list-style: none;
+  }
+
+  details > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      transition-duration: 0.01ms !important;
+      animation-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer utilities {
+  .cq-inline {
+    container-type: inline-size;
+  }
+
+  .scroll-pane {
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+
+  .telemetry-grid {
+    display: grid;
+    grid-template-columns: repeat(1, minmax(0, 1fr));
+    gap: 1px;
+  }
+
+  @container (min-width: 34rem) {
+    .telemetry-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @container (min-width: 56rem) {
+    .telemetry-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+  }
+
+  .cards-grid {
+    display: grid;
+    grid-template-columns: repeat(1, minmax(0, 1fr));
+    gap: 0.75rem;
+  }
+
+  @container (min-width: 40rem) {
+    .cards-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @container (min-width: 68rem) {
+    .cards-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+  }
+}

@@ -1,0 +1,28 @@
+# AI Workspace
+.agent/
+.agents/
+.superpowers/
+
+# Binaries
+/golab
+/bin/
+/dist/
+
+# Docs
+docs/
+docs/*
+
+# OS Files
+.DS_Store
+
+# Go
+/vendor/
+
+# Python (Legacy)
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Frontend dependencies
+ui/node_modules/
+.pnpm-debug.log*

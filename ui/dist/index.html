@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <script>
+      try {
+        const stored = localStorage.getItem('color-scheme');
+        if (stored === 'light' || stored === 'dark' || stored === 'light dark') {
+          document.querySelector('meta[name="color-scheme"]')?.setAttribute('content', stored);
+        }
+      } catch {}
+    </script>
+    <title>GoLab Control Plane</title>
+    <script type="module" crossorigin src="/assets/index-BPNmLrBR.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-Ctj8sJ9m.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

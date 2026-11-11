@@ -1,0 +1,66 @@
+name: Release GoLab v2 Binaries
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Publish Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Build Embedded Production UI
+        working-directory: ui
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run check:design
+          ./node_modules/.bin/tsc --noEmit
+          ./node_modules/.bin/vite build
+
+      - name: Cross-Compile GoLab v2 Binaries
+        run: |
+          mkdir -p dist
+          VERSION="${GITHUB_REF_NAME}"
+          for target in "darwin arm64 golab-darwin-arm64" \
+                        "darwin amd64 golab-darwin-amd64" \
+                        "linux amd64 golab-linux-amd64" \
+                        "linux arm64 golab-linux-arm64" \
+                        "windows amd64 golab-windows-amd64.exe"; do
+            set -- $target
+            echo "Building $3 ($1/$2)..."
+            CGO_ENABLED=0 GOOS=$1 GOARCH=$2 go build -trimpath -ldflags="-s -w" -o "dist/$3" ./cmd/server
+          done
+          (cd dist && sha256sum golab-* > checksums.txt)
+
+      - name: Publish GitHub Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/golab-*
+            dist/checksums.txt
